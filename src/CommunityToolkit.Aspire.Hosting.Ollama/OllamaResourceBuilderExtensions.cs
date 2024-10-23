@@ -2,6 +2,7 @@
 using Aspire.Hosting.Lifecycle;
 using Aspire.Hosting.Utils;
 using CommunityToolkit.Aspire.Hosting.Ollama;
+using OllamaSharp.Models;
 
 namespace Aspire.Hosting;
 
@@ -24,8 +25,6 @@ public static class OllamaResourceBuilderExtensions
         ArgumentNullException.ThrowIfNull(builder, nameof(builder));
         ArgumentNullException.ThrowIfNull(name, nameof(name));
 
-        builder.Services.TryAddLifecycleHook<OllamaResourceLifecycleHook>();
-
         var resource = new OllamaResource(name);
         return builder.AddResource(resource)
           .WithAnnotation(new ContainerImageAnnotation { Image = OllamaContainerImageTags.Image, Tag = OllamaContainerImageTags.Tag, Registry = OllamaContainerImageTags.Registry })
@@ -47,8 +46,9 @@ public static class OllamaResourceBuilderExtensions
     public static IResourceBuilder<OllamaResource> AddOllama(this IDistributedApplicationBuilder builder,
       string name = "Ollama", int? port = null, string modelName = "llama3")
     {
-        return builder.AddOllama(name, port)
-          .AddModel(modelName);
+        var resourceBuilder = builder.AddOllama(name, port);
+        resourceBuilder.AddModel(modelName);
+        return resourceBuilder;
     }
 
     /// <summary>
@@ -73,7 +73,7 @@ public static class OllamaResourceBuilderExtensions
     /// <param name="builder">The <see cref="IDistributedApplicationBuilder"/>.</param>
     /// <param name="modelName">The name of the LLM to download on initial startup.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
-    public static IResourceBuilder<OllamaResource> AddModel(this IResourceBuilder<OllamaResource> builder, string modelName)
+    public static IResourceBuilder<OllamaResource> AddModelLegacy(this IResourceBuilder<OllamaResource> builder, string modelName)
     {
         ArgumentNullException.ThrowIfNull(builder, nameof(builder));
         ArgumentException.ThrowIfNullOrWhiteSpace(modelName, nameof(modelName));
@@ -82,16 +82,69 @@ public static class OllamaResourceBuilderExtensions
         return builder;
     }
 
+    public static IResourceBuilder<OllamaModelResource> AddModel(this IResourceBuilder<OllamaResource> builder, string modelName)
+    {
+        ArgumentNullException.ThrowIfNull(builder, nameof(builder));
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName, nameof(modelName));
+
+        string resourceName = $"{builder.Resource.Name}-{modelName.Split(':')[0].Split('/').Last().Replace('.', '-')}";
+
+        return AddModel(builder, resourceName, modelName);
+    }
+
+
+    public static IResourceBuilder<OllamaModelResource> AddModel(this IResourceBuilder<OllamaResource> builder, string name, string modelName)
+    {
+        ArgumentNullException.ThrowIfNull(builder, nameof(builder));
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName, nameof(modelName));
+
+        builder.ApplicationBuilder.Services.TryAddLifecycleHook<OllamaModelResourceLifecycleHook>();
+
+        builder.Resource.AddModel(modelName);
+        var modelResource = new OllamaModelResource(name, modelName, builder.Resource);
+
+        return builder.ApplicationBuilder.AddResource(modelResource);
+    }
+
+    public static IResourceBuilder<OllamaModelResource> AddHuggingFaceModel(this IResourceBuilder<OllamaResource> builder, string name, string modelName)
+    {
+        ArgumentNullException.ThrowIfNull(builder, nameof(builder));
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName, nameof(modelName));
+
+        builder.ApplicationBuilder.Services.TryAddLifecycleHook<OllamaModelResourceLifecycleHook>();
+
+        if (!modelName.StartsWith("hf.co/") && !modelName.StartsWith("huggingface.co/"))
+        {
+            modelName = "hf.co/" + modelName;
+        }
+
+        builder.Resource.AddModel(modelName);
+        var modelResource = new OllamaModelResource(name, modelName, builder.Resource);
+
+        return builder.ApplicationBuilder.AddResource(modelResource);
+    }
+
     /// <summary>
     /// Sets the default model to be configured on the Ollama server.
     /// </summary>
     /// <param name="builder">The <see cref="IResourceBuilder{T}"/>.</param>
     /// <param name="modelName">The name of the model.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    public static IResourceBuilder<OllamaResource> WithDefaultModelLegacy(this IResourceBuilder<OllamaResource> builder, string modelName)
+    {
+        ArgumentNullException.ThrowIfNull(builder, nameof(builder));
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelName, nameof(modelName));
+
+        builder.Resource.SetDefaultModel(modelName);
+        return builder;
+    }
+
     public static IResourceBuilder<OllamaResource> WithDefaultModel(this IResourceBuilder<OllamaResource> builder, string modelName)
     {
         ArgumentNullException.ThrowIfNull(builder, nameof(builder));
         ArgumentException.ThrowIfNullOrWhiteSpace(modelName, nameof(modelName));
+
+        builder.AddModel(modelName);
 
         builder.Resource.SetDefaultModel(modelName);
         return builder;
@@ -131,6 +184,23 @@ public static class OllamaResourceBuilderExtensions
             }
         });
     }
+
+    public static IResourceBuilder<T> WithReference<T>(this IResourceBuilder<T> builder, IResourceBuilder<OllamaModelResource> ollamaModel) where T : IResourceWithEnvironment
+    {
+        ArgumentNullException.ThrowIfNull(builder, nameof(builder));
+        ArgumentNullException.ThrowIfNull(ollamaModel, nameof(ollamaModel));
+
+        var resource = (IResourceWithConnectionString)ollamaModel.Resource;
+        return builder.WithEnvironment(context =>
+        {
+            var connectionStringName = resource.ConnectionStringEnvironmentVariable ?? $"{ConnectionStringEnvironmentName}{resource.Name}";
+
+            context.EnvironmentVariables[connectionStringName] = new ConnectionStringReference(resource, optional: false);
+
+            context.EnvironmentVariables[$"Aspire__OllamaSharp__{resource.Name}__SelectedModel"] = ollamaModel.Resource.ModelName;
+        });
+    }
+
 
     /// <summary>
     /// Adds an administration web UI Ollama to the application model using Attu. This version the package defaults to the main tag of the Open WebUI container image
